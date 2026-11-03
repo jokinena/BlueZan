@@ -50,7 +50,6 @@ def normalizedDifference(image_array, band_indices):
   
 # sansibar
 fp = '/mnt/d/BlueZan/S2/downloads/Chwaka-NESAP_S2B_20260723T072619_10m_bands.tif' # filepath for satellite image
-
 fp_poly = '/mnt/d/BlueZan/shapes/Chwaka-NESAP_deglint.gpkg'
 
 outdir = os.path.join(os.path.dirname(fp), 'deglint')
@@ -133,12 +132,12 @@ if __name__ == '__main__':
                 figname = os.path.join(outdir, 'deglint_band' + str(i+1) + '.png')
                 fig, ax = plt.subplots()
                 ax.scatter(bnir_re, band_data_re, s=0.5, c='k')
-                ax.text(min(bnir_re), max(band_data_re[0]), r_sq)
+                ax.text(min(bnir_re[:,0]), max(band_data_re[0]), r_sq)
                 ax.plot(bnir_re, slope*bnir_re + intercept)
                 ax.set_xlabel('NIR')
                 ax.set_ylabel('Band ' + str(i+1))
                 ax.set_title(os.path.join('Band ' + str(i+1) + ' ' + os.path.basename(file)))
-    #            plt.savefig(figname, dpi=150)
+                plt.savefig(figname, dpi=150)
                 plt.show()
                 # deglint  Hedley et al. (2005)
                 band_deglint = full_band - slope * (img[nir_band-1] - minNIR)       
