@@ -23,14 +23,17 @@ import pickle
 
 
 # filepaths
-fp_img = '/mnt/d/users/e1008409/MK/sansibar/S2/Chwaka/deglint/S2_2025_chwaka_deglint.tif' # full filepath to image
-fp = '/mnt/d/users/E1008409/MK/sansibar/Opetusdatat/Chwaka_annotation.gpkg' # full filepath to annotation polygons
+fp_img = '/mnt/d/BlueZan/S2/downloads/deglint/Chwaka-NESAP_S2B_20260723T072619_10m_bands_deglint.tif' # filepath for satellite image
+fp = '/mnt/d/BlueZan/S2/annotation/Chwaka_annotation.gpkg' # filepath for field points
+
+#fp_img = '/mnt/d/users/e1008409/MK/sansibar/S2/Chwaka/deglint/S2_2025_chwaka_deglint.tif' # full filepath to image
+#fp = '/mnt/d/users/E1008409/MK/sansibar/Opetusdatat/Chwaka_annotation.gpkg' # full filepath to annotation polygons
 
 # Edit lines below to change the number of folds in cross-validation and which model to use
 # set how many splits for CV
 n_splits = 3
 # Classifier
-model = RandomForestClassifier(n_estimators=100, max_depth=None, n_jobs=5 ,max_features='sqrt', bootstrap=True, oob_score=True)
+model = RandomForestClassifier(n_estimators=150, max_depth=None, n_jobs=5 ,max_features='sqrt', bootstrap=True, oob_score=True)
 #model = SVC(C=1, kernel='rbf', degree=3) # this can be slow! 
 modelname = 'randomForest' # give name for model
 labelcol = 'label' # column name which has the labels for polygon annotation
@@ -101,7 +104,7 @@ def plotAccuracyStats(result, gdf, outdir, labelcol):
 
 def createOutFolder(fp):
     # define output folder
-    outdir = os.path.join(os.path.dirname(fp), 'classification_2025')
+    outdir = os.path.join(os.path.dirname(fp), 'classification_2026')
     if not os.path.isdir(outdir):
         os.mkdir(outdir)
     return outdir
@@ -176,7 +179,7 @@ def crossvalidateModel(model, modelname, folds, gdf, img, profile, outdir):
         result['F1'].append(f1_score)
     # save model
     model.fit(train_data, labels)
-    modelout = os.path.join(outdir, modelname + '25.sav')
+    modelout = os.path.join(outdir, modelname + '26.sav')
     pickle.dump(model, open(modelout, 'wb'))
     print('Saved model to', modelout)
     return result
