@@ -14,12 +14,19 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.svm import SVC
 from sklearn.ensemble import RandomForestClassifier
 import pickle
-
+import geopandas as gpd
 
 # filepaths
-fp_img = '/mnt/d/users/e1008409/MK/sansibar/planet/ChwakaBay_04-2024_psscene_analytic_8b_sr_udm2/deglint/20240430_3B_AnalyticMS_SR_8b_merge_deglint.tif' # full filepath to image to be classified
-fp_img = '/mnt/d/users/e1008409/MK/sansibar/S2/Chwaka/deglint/S2_2025_chwaka_deglint.tif' # full filepath to image to be classified
-fp_model = '/mnt/d/users/E1008409/MK/sansibar/Opetusdatat/classification_2025/randomForest25.sav' # full filepath to model
+fp_img = '/mnt/d/BlueZan/S2/downloads/deglint/Chwaka-NESAP_S2B_20260723T072619_10m_bands_deglint.tif' # filepath for satellite image
+fp_model = '/mnt/d/BlueZan/S2/annotation/classification_2026/randomForest26.sav' # full filepath to model
+fp = '/mnt/d/BlueZan/S2/annotation/Chwaka_annotation.gpkg' # filepath for field points
+
+# Set True if predict probabilities
+PREDICT_PROBA = True
+
+# set descriptions from labels
+gdf = gpd.read_file(fp)
+descriptions = [f'{n}_proba' for n in np.unique(gdf.label)]
 
 # No need to edit below
 # -------------------------------------------------------------- #
@@ -34,7 +41,7 @@ def readModel(fp_model):
 def readImage(fp_image):
     # read image
     with rio.open(fp_img) as src: # opens filepath for reading
-        img = src.read() # reads image
+        img = src.read(masked=True) # reads image
         profile = src.profile # reads image metadata
     # transpose image shape
     img = img.transpose(1,2,0)
@@ -57,9 +64,39 @@ def predict(model, modelname, image, profile, outdir):
     with rio.open(outfile, 'w', **outprofile) as dst:
         dst.write(prediction,1)
     print('Saved predicted image to', outfile)
- 
+
+def pred_proba(model, modelname, image, profile, outdir, descriptions):
+    # predict
+    predicted = model.predict_proba(img.reshape(-1,img.shape[-1]))
+    # prediction back to 2D array
+    prediction = predicted.reshape(img.shape[0], img.shape[1], len(model.classes_))
+    # mask nodata
+    mask2d = np.any(img.mask, axis=-1)   # True where any input channel is masked
+    mask2d = np.expand_dims(mask2d, axis=2)
+    prediction = np.ma.where(mask2d, np.nan, prediction)
+    # transpose
+    prediction = prediction.transpose(2,0,1)
+
+    # update metadata
+#    print(profile)
+    outprofile = profile.copy()
+    outprofile.update(dtype='float32',
+                  count=len(model.classes_),
+                  nodata=np.nan,
+                  )
+    # save
+    outfile = os.path.join(outdir, modelname + '_classification_proba_s2_2026.tif')
+    with rio.open(outfile, 'w', **outprofile) as dst:
+        dst.write(prediction)
+        dst.descriptions = tuple(descriptions)
+    print('Saved predicted image to', outfile)
+    
+
 if __name__ == "__main__":
     img, profile = readImage(fp_img)
     model, outdir = readModel(fp_model)
-    predict(model, modelname, img, profile, outdir)
+    if PREDICT_PROBA:
+        pred_proba(model, modelname, img, profile, outdir, descriptions)
+    else:
+        predict(model, modelname, img, profile, outdir)
 
