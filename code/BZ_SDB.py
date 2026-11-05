@@ -22,8 +22,7 @@ import gc
 from sklearn import metrics
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LinearRegression
-from sklearn.preprocessing import PolynomialFeatures
-
+from sklearn.ensemble import RandomForestRegressor
 
 # function to compute logarithmic band ratio from given bands
 def StumpfLogBandRatio(image_array, bands):
@@ -85,7 +84,6 @@ if not os.path.isdir(outdir):
 with rio.open(fp_img) as src:
     img = src.read()
     profile = src.profile
-#img = np.ma.masked_equal(img,0)
 # pts
 gdf = gpd.read_file(fp_pts, engine='pyogrio')
 print(gdf.columns)
@@ -107,11 +105,6 @@ gdf = sampleRaster(outname, fp_pts)
 gdf = gdf.rename(columns={'sampled': 'logbr'})
 print(gdf.columns)
 gdf['Depth'] = gdf['depth'].astype(float)
-# select sand bottom
-#gdf = gdf[(gdf.Sand == 1) & (gdf.Seagrass == 0) & (gdf.Coral == 0) & (gdf.Mixed == 0) & (gdf.Macroalga == 0)]
-# keep data up to 15m depth and more than 1
-gdf = gdf[gdf['Depth'] < 18]
-#gdf = gdf[gdf['Depth'] >= 2]
 
 # set train and test data
 X = np.array(gdf.logbr).reshape(-1,1)
@@ -134,7 +127,6 @@ ax.set_xlim(np.min(X), np.max(X))
 ax.set_ylim(np.min(y), np.max(y))
 plt.legend()
 plt.show()
-
 
 # train and test
 X_train, X_test, y_train, y_test = train_test_split(X, y,
@@ -177,8 +169,8 @@ ax[1].set_title('Accuracy')
 plt.tight_layout()
 plt.show()
 
+# fit all data to predict
 reg = LinearRegression().fit(X, y)
-
 
 # reshape logbr for predict
 logbr_re = np.reshape(logbr, (-1,1))
@@ -198,18 +190,6 @@ bathy_out = os.path.join(outdir, 'logbr_bathy.tif')
 with rio.open(bathy_out, 'w', **outprof) as dst:
     dst.write(predicted)
 
-
-
-
-    
-bathy = m1*logbr+m0
-print(np.nanmin(bathy))
-print(np.nanmax(bathy))
-bathy = np.where(bathy < 0, np.nan, bathy)
-# save
-bathy_out = os.path.join(outdir, 'logbr_bathy_test.tif')
-with rio.open(bathy_out, 'w', **outprof) as dst:
-    dst.write(bathy,1)
 
 
 
