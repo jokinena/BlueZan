@@ -22,8 +22,8 @@ fp_model = '/mnt/d/BlueZan/S2/annotation/classification_2026/randomForest26.sav'
 fp = '/mnt/d/BlueZan/S2/annotation/Chwaka_annotation.gpkg' # filepath for field points
 
 # Set True if predict probabilities
-PREDICT_PROBA = True
-SAVE_SINGLE_BAND_PROBA = True
+PREDICT_PROBA = False
+SAVE_SINGLE_BAND_PROBA = False
 # set descriptions from labels
 gdf = gpd.read_file(fp)
 descriptions = [f'{n}_proba' for n in np.unique(gdf.label)]
@@ -53,14 +53,17 @@ def predict(model, modelname, image, profile, outdir):
     # prediction back to 2D array
     prediction = predicted.reshape(img.shape[0], img.shape[1])
     # mask nodata
-    prediction = np.where(img[:,:,0] == 0, 0, prediction)
+    mask2d = np.any(img.mask, axis=-1)   # True where any input channel is masked
+    
+    prediction = np.ma.where(mask2d, 0, prediction)
     # update metadata
 #    print(profile)
     outprofile = profile.copy()
     outprofile.update(dtype='uint8',
-                  count=1)
+                  count=1,
+                  nodata=0)
     # save
-    outfile = os.path.join(outdir, modelname + '_classification_s2_2025.tif')
+    outfile = os.path.join(outdir, modelname + '_classification_s2_2026.tif')
     with rio.open(outfile, 'w', **outprofile) as dst:
         dst.write(prediction,1)
     print('Saved predicted image to', outfile)
