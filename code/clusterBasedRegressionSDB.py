@@ -10,9 +10,13 @@ Steps
 1. K-means clustering
 2. Log band ratios (Stumpf et al.)
 
+TODO: Handle points that are within same pixel
+    Spatial autocorrelation in model accuracy assessment
+
 @author: E1008409
 """
 
+from rasterio.transform import rowcol, xy
 import pandas as pd
 import geopandas as gpd
 import rasterio as rio
@@ -20,13 +24,15 @@ import numpy as np
 import os
 import matplotlib.pyplot as plt
 import itertools
-from rasterstats import zonal_stats
 from sklearn import metrics
 from sklearn.cluster import KMeans
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LinearRegression
-    
+from sklearn.ensemble import RandomForestRegressor
+#import statsmodels.api as sm
+#import statsmodels.formula.api as smf
+
 # function to compute logarithmic band ratio from given bands
 def StumpfLogBandRatio(image_array, bands):
     """
@@ -50,160 +56,296 @@ def StumpfLogBandRatio(image_array, bands):
     
     return logbr
 
-def getRioBbox(filepath):
+def sampleRaster(raster_fp, geodataframe_fp, colnames):
+    # Read sampling points
+    geodf = gpd.read_file(
+        geodataframe_fp,
+        engine="pyogrio"
+    )
+
+    with rio.open(raster_fp) as src:
+        # Validate CRS
+        if geodf.crs is None:
+            raise ValueError("The input GeoDataFrame has no CRS.")
+
+        if src.crs is None:
+            raise ValueError("The raster has no CRS.")
+
+        # Reproject points into the raster CRS
+        if geodf.crs != src.crs:
+            geodf = geodf.to_crs(src.crs)
+
+        # Explode the entire GeoDataFrame, not only its geometry
+        geodf = geodf.explode(
+            index_parts=False,
+            ignore_index=True
+        )
+
+        # Ensure all remaining geometries are Points
+        invalid_types = geodf.geometry.geom_type.ne("Point")
+
+        if invalid_types.any():
+            types = geodf.loc[
+                invalid_types,
+                geodf.geometry.name
+            ].geom_type.unique()
+
+            raise TypeError(
+                "All geometries must be Point or MultiPoint. "
+                f"Found: {types.tolist()}"
+            )
+
+        # Extract x, y coordinates
+        coords = list(zip(
+            geodf.geometry.x,
+            geodf.geometry.y
+        ))
+
+        # Sample one array per coordinate
+        sampled = list(src.sample(coords, masked=True))
+
+        if len(colnames) != src.count:
+            raise ValueError(
+                f"The raster has {src.count} bands, but "
+                f"{len(colnames)} column names were provided."
+            )
+        
+        # check sampled data type
+        if isinstance(sampled[0], np.ma.MaskedArray):
+            sampled_data = [s.data for s in sampled]
+        else:
+            sampled_data = sampled
+        # Convert samples to a DataFrame with matching row index
+        sample_df = pd.DataFrame(
+            sampled_data,
+            columns=colnames,
+            index=geodf.index
+        )
+
+        # Assign sampled band values
+        geodf[colnames] = sample_df
+
+    return geodf
+
+def sampleToGDF(raster_fp, geodataframe, colnames):
+
+    with rio.open(raster_fp) as src:
+        # Validate CRS
+        if geodataframe.crs is None:
+            raise ValueError("The input GeoDataFrame has no CRS.")
+
+        if src.crs is None:
+            raise ValueError("The raster has no CRS.")
+
+        # Reproject points into the raster CRS
+        if geodataframe.crs != src.crs:
+            geodataframe = geodataframe.to_crs(src.crs)
+
+        # Explode the entire GeoDataFrame, not only its geometry
+        geodataframe = geodataframe.explode(
+            index_parts=False,
+            ignore_index=True
+        )
+
+        # Ensure all remaining geometries are Points
+        invalid_types = geodataframe.geometry.geom_type.ne("Point")
+
+        if invalid_types.any():
+            types = geodataframe.loc[
+                invalid_types,
+                geodataframe.geometry.name
+            ].geom_type.unique()
+
+            raise TypeError(
+                "All geometries must be Point or MultiPoint. "
+                f"Found: {types.tolist()}"
+            )
+
+        # Extract x, y coordinates
+        coords = list(zip(
+            geodataframe.geometry.x,
+            geodataframe.geometry.y
+        ))
+
+        # Sample one array per coordinate
+        sampled = list(src.sample(coords, masked=True))
+
+        if len(colnames) != src.count:
+            raise ValueError(
+                f"The raster has {src.count} bands, but "
+                f"{len(colnames)} column names were provided."
+            )
+
+        # Convert samples to a DataFrame with matching row index
+        sample_df = pd.DataFrame(
+            sampled,
+            columns=colnames,
+            index=geodataframe.index
+        )
+
+        # Assign sampled band values
+        geodataframe[colnames] = sample_df
+
+    return geodataframe
+
+def aggregate_to_s2_pixels(
+    atl24: gpd.GeoDataFrame,
+    s2_raster: str,
+    depth_col: str = "depth"
+) -> gpd.GeoDataFrame:
     """
-    Get bounding box of a raster layer 
+    Aggregate ATL24 depths to Sentinel-2 pixels using median depth.
+
+    Output geometry is the center of each Sentinel-2 pixel.
 
     Parameters
     ----------
-    filepath : str
-        String filepath.
+    atl24 : GeoDataFrame
+        ATL24 point observations.
+    s2_raster : str
+        Sentinel-2 raster defining the target pixel grid.
+    depth_col : str
+        Column containing bathymetric depth.
 
     Returns
     -------
-    Bounding box as GeoDataFrame and JSON format list of bounding box coordinates
-
+    GeoDataFrame
+        One point per Sentinel-2 pixel with:
+        - depth: median depth
+        - n_obs: number of ATL24 observations
+        - geometry: Sentinel-2 pixel center
     """
-    import rasterio as rio
-    import geopandas as gpd
-    from shapely.geometry import box
-    from fiona.crs import from_epsg
-    import json
-    
-    with rio.open(filepath) as src:
-        bbox = box(src.bounds[0],src.bounds[1],src.bounds[2],src.bounds[3]) # left bottom, right top
-     # polygonize bbox
-    bbox_poly = gpd.GeoDataFrame({'geometry': bbox}, index=[0], crs=src.crs) 
-    # get features 
-    coords = [json.loads(bbox_poly.to_json())['features'][0]['geometry']]
-    return bbox_poly, coords
 
-def clipToBbox(raster_fp, vector_fp):
-    """
-    Clip to bounding box of raster layer
+    with rio.open(s2_raster) as src:
 
-    Parameters
-    ----------
-    raster_fp : TYPE
-        DESCRIPTION.
-    vector_fp : TYPE
-        DESCRIPTION.
+        # Reproject ATL24 points to Sentinel-2 CRS
+        gdf = atl24.to_crs(src.crs).copy()
 
-    Returns
-    -------
-    None.
+        # Remove missing depths
+        gdf = gdf.dropna(subset=[depth_col])
 
-    """
-    bbox, coords = getRioBbox(raster_fp)
-    
-    # read vector
-    gdf = gpd.read_file(vector_fp)
-    # reproject bbox if not same with gdf
-    if bbox.crs != gdf.crs:
-        bbox = bbox.to_crs(gdf.crs)
-    # clip
-    clipped = gpd.clip(gdf, bbox, keep_geom_type=True)
-    return clipped
+        # Find Sentinel-2 pixel for every point
+        rows, cols = rowcol(
+            src.transform,
+            gdf.geometry.x,
+            gdf.geometry.y
+        )
 
-def maskSigma3Outliers(array):
-    """
-    Mask outliers > 3 *std from the mean
+        gdf["row"] = rows
+        gdf["col"] = cols
 
-    Parameters
-    ----------
-    array : TYPE
-        DESCRIPTION.
+        # Keep only points inside the raster
+        gdf = gdf[
+            (gdf["row"] >= 0) &
+            (gdf["row"] < src.height) &
+            (gdf["col"] >= 0) &
+            (gdf["col"] < src.width)
+        ]
 
-    Returns
-    -------
-    arr_out : TYPE
-        DESCRIPTION.
+        # Median depth per pixel
+        pixels = (
+            gdf.groupby(["row", "col"])
+            .agg(
+                depth=(depth_col, "median"),
+                n_obs=(depth_col, "size")
+            )
+            .reset_index()
+        )
 
-    """
-    a_mean = np.nanmean(array)
-    a_std = np.nanstd(array)
-    sigthree = 3*a_std
-    arr_out = np.where(np.abs((array - a_mean)) > sigthree, np.nan, array)
-    return arr_out
+        # Exact Sentinel-2 pixel-center coordinates
+        x, y = xy(
+            src.transform,
+            pixels["row"],
+            pixels["col"],
+            offset="center"
+        )
+
+        pixels["geometry"] = gpd.points_from_xy(x, y)
+
+        return gpd.GeoDataFrame(
+            pixels,
+            geometry="geometry",
+            crs=src.crs
+        )
 
 # filepaths
-fp = '/mnt/d/users/e1008409/MK/sansibar/S2/downloads/S2_masked/S2B_MSIL2A_20260723T072619_N0512_R049_T37MEP_20260723T112037_B02B03B04B08_masked.tif'
+fp = "/mnt/d/BlueZan/S2/downloads/Chwaka-NESAP_S2B_20260723T072619_10m_bands.tif"
 # ground truth
-fp_gt = "/mnt/d/users/e1008409/MK/sansibar/Mission_10_2024/Field_work/BlueZan_habitat_data_11_2024.gpkg"
+fp_gt = "/mnt/d/BlueZan/Field_data/BlueZan_habitat_data_11_2024_labels_edit.gpkg"
+fp_atl24 = '/mnt/d/BlueZan/ICESAT-2/atl24_conf80_depths_chwaka-nesap.gpkg'
+fp_kmeans = "/mnt/d/BlueZan/S2/annotation/classification_2026/randomForest26_classification_s2_2026.tif"
+
+USE_CLASSIFICATION_MAP = True
+DEPTH_COL = 'depth'
+
+# ------------------------ # 
+# Read ATL24 data and filter 1 obs per pixel
+# ------------------------ #
+atl24 = gpd.read_file(fp_atl24)
+
+depth_pixels = aggregate_to_s2_pixels(
+    atl24, fp, depth_col="depth_m")
+# save
+filtered_points = fp_atl24.split('.')[0] + '_filtered.gpkg'
+depth_pixels.to_file(
+    filtered_points,
+    driver="GPKG"
+)
 
 # ------------------------ # 
 # 1. K-means unsupervised classification
 # ------------------------ #
+if USE_CLASSIFICATION_MAP:
+    # read KMeans clustered image
+    with rio.open(fp_kmeans) as src:
+        kmeans = src.read()
+        kmeans_prof = src.profile
+else:
+    # read KMeans clustered image
+    with rio.open(fp_kmeans) as src:
+        kmeans = src.read()
+        kmeans_prof = src.profile
+    # update nodata
+    kmeans_prof.update(nodata=0)
+    # save
+    kmeans_out = fp_kmeans.split('.')[0] + '_nodata_updated.tif'
+    with rio.open(kmeans_out, 'w', **kmeans_prof) as dst:
+        dst.write(kmeans)
 
-# open
-with rio.open(fp) as src:
-    img = src.read()
-    meta = src.meta
-# nodatamask
-mask = np.isnan(img[0])
+# ----------------------------- # 
+# 2. Read field data and prepare dataset
+# sample
+if USE_CLASSIFICATION_MAP:
+    gdf = sampleRaster(fp_kmeans, filtered_points, ['kmeans'])
+else:    
+    gdf = sampleRaster(kmeans_out, filtered_points, ['kmeans'])
 
-# flatten each band
-flat_data = np.empty((img.shape[1]*img.shape[2], img.shape[0]))
-
-for i in range(img.shape[0]):
-    band = img[i,:,:]
-    flat_data[:,i-1] = band.flatten()
-
-# standard scaling
-#scaler = StandardScaler().fit(flat_data)
-#scaled_img = scaler.transform(flat_data)
-
-# replace nan
-scaled_img = np.where(np.isnan(flat_data), -9999, flat_data)
-
-# kmeans clustering
-km = KMeans(n_clusters=8)
-km.fit(scaled_img)
-pred = km.predict(scaled_img)
-cluster_centers = km.cluster_centers_
-# plot clusters
-fig, ax = plt.subplot()
-ax.plot()
-
-
-# back to 2-d array
-clustered = pred.reshape(src.shape[0], src.shape[1])
-plt.imshow(clustered)
-
-# mask nodata area
-clustered = np.where(mask == True, -9999, clustered)
-
-# save
-unsup_out = os.path.join(os.path.dirname(fp), 'n6_clustered.tif')
-unsup_meta = meta.copy()
-unsup_meta.update(dtype='int32',
-                  nodata=-9999,
-                  count=1)
-
-with rio.open(unsup_out, 'w', **unsup_meta) as dst:
-    dst.write(clustered.astype(rio.int16), 1)
-
+# fix depths to floats
+if gdf[DEPTH_COL].dtype != 'float64':
+    # convert syvyys_mitattu to numeric
+    gdf[DEPTH_COL] = gdf[DEPTH_COL].astype(float)
+else:
+    # absolute values
+    gdf[DEPTH_COL] = abs(gdf[DEPTH_COL])
 
 # --------------------------- #
 # 2. Log band ratios
-
+with rio.open(fp) as src:
+    img = src.read()
+    profile = src.profile
 # list of unique band pairs
 unique_pairs = list(itertools.combinations(np.arange(1,4), 2))
-#unique_pairs = unique_pairs[1:]
 # compute band ratios
 band_ratios = [StumpfLogBandRatio(img, u) for u in unique_pairs]
 # to array
 band_ratios = np.array(band_ratios)
-# transpose
-#band_ratios = np.transpose(band_ratios, (1,2,0))
-
 # save stack for sampling
 outdir = os.path.join(os.path.dirname(fp), 'sdb')
 if not os.path.isdir(outdir):
     os.mkdir(outdir)
 stack_out = os.path.join(outdir, 'band_ratios_temp.tif')
 
-stack_meta = meta.copy()
+stack_meta = profile.copy()
 stack_meta.update(count=band_ratios.shape[0],
                   nodata=np.nan,
                   dtype='float32')
@@ -211,127 +353,38 @@ stack_meta.update(count=band_ratios.shape[0],
 with rio.open(stack_out, 'w', **stack_meta) as dst:
     dst.write(band_ratios)
 
-# ----------------------------- # 
-# 3. Read field data and prepare dataset
-
-#gdf = clipToBbox(fp, fp_gt)
-# columns to select
-#cols = ['id', 'menetelma', 'syvyys_mitattu', 'geometry']
-# select
-#gdf = gdf[cols]
-
-
-# read data
-gdf = gpd.read_file(fp_gt) # layer='training2_sand_soft_hard_class'
-# select relevant columns
-gdf = gdf[['id', 'menetelma', 'syvyys_mitattu', 'savcov', 'geometry']]
-
-# drop na string rows in menetelma
-gdf = gdf[gdf['menetelma'] != 'NA']
-# to int
-gdf.menetelma = gdf.menetelma.astype(int)
-
-# fix depths to floats
-if gdf.syvyys_mitattu.dtype != 'float64':
-    # convert syvyys_mitattu to numeric
-    gdf['temp'] = gdf.syvyys_mitattu.str.split('-')
-    gdf[['temp', 'temp2']] = gpd.GeoDataFrame(gdf.temp.tolist(), index=gdf.index)
-    gdf['field_depth'] = gdf['temp2'].str.replace(',','.').astype(float)
-    # drop temp columns
-    gdf = gdf.drop(['temp', 'temp2'], axis=1)
-
-else:
-    # absolute values
-    gdf['field_depth'] = abs(gdf.syvyys_mitattu)
-
-#gdf_dropvid = gdf.loc[gdf.menetelma == 42] # for testing
-# select dive, aquascope, drop video points
-gdf = gdf[gdf.menetelma.isin([21, 23, 25, 42])]
-
-# keep rows where field depth > 0.1
-gdf = gdf[gdf.field_depth >= 0.1]
-
-######### sampling ###########
-
-# check crs
-src = rio.open(stack_out)
-if gdf.crs.to_epsg() != src.crs.to_epsg():
-    print('Reprojecting points')
-    gdf = gdf.to_crs(epsg=src.crs.to_epsg())
-src.close()
-
-# create buffer 
-gdf['poly_geom'] = gdf.geometry.buffer(2, cap_style=3)
-# band ratio column names
-br_cols = ['bg', 'by', 'br',
-     'gy', 'gr', 'yr']
-
-# rasterstats
-n=0
-for i in band_ratios:
-    stats = zonal_stats(gdf.poly_geom, i, stats=['mean'], affine=stack_meta['transform'], all_touched=True, nodata=stack_meta['nodata'])
-    statlist = [d['mean'] for d in stats]
-    gdf[br_cols[n]] = statlist
-    n+=1
-
-# sample cluster
-# read
-with rio.open(unsup_out) as src:
-    clustered = src.read()
-    clust_meta = src.meta
-clusters = zonal_stats(gdf.geometry, clustered[0], stats=['mean'], affine=clust_meta['transform'], all_touched=False, nodata=clust_meta['nodata'])
-clusters = [c['mean'] for c in clusters]
-gdf['cluster'] = clusters
-
-# drop if sampled na
-gdf = gdf.dropna()
-gdf = gdf[gdf.cluster != clust_meta['nodata']]
-
-# drop depths > 6m
-gdf = gdf[gdf.field_depth <= 6.0]
-
-# plot
-fig, ax = plt.subplots(2,3)
-i,j = 0,0
-for col in br_cols:
-    ax[i,j].scatter(gdf[col], gdf.field_depth, s=0.5, color='Black')
-#    ax[i,j].set_xticks(np.arange(0,max(gdf[col]), 0.25))
-    ax[i,j].set_yticks(np.arange(0,max(gdf.field_depth), 1))
-    ax[i,j].set_title(col)
-    i += 1
-    if i > 1:
-        i = 0
-        j += 1
-plt.tight_layout()
-plt.show()
+# sample band ratios to points
+logbr_cols = [f'br_{b}' for b in np.arange(1, len(band_ratios)+1) ]
+gdf = sampleToGDF(stack_out, gdf, logbr_cols)
 
 # ----------------------------- #
 # 4. Multiple linear regression
-predictions = []
+predictions = np.zeros(shape=kmeans.shape)
 # select points by cluster
-for u in np.unique(gdf.cluster):
-    sel = gdf[gdf['cluster'] == u]
+for u in np.unique(gdf['kmeans']):
+    sel = gdf[gdf['kmeans'] == u]
     if len(sel) < 100:
         continue
     
-    # split to train test
-    X = sel[br_cols]
-    y = sel['field_depth']
+    # set data 
+    X = sel[logbr_cols]
+    y = sel[DEPTH_COL]
     
     X_train, X_test, y_train, y_test = train_test_split(X, y,
                                                         test_size=0.3,
                                                         random_state=123)
-    
-    # mlr
-    mlr = LinearRegression()
-    mlr.fit(X_train, y_train)
+    # reg
+    reg = RandomForestRegressor()
+    reg.fit(X_train, y_train)
     # predict
-    pred = mlr.predict(X_test)
-    score = mlr.score(X_test, y_test)
+    pred = reg.predict(X_test)
+    score = reg.score(X_test, y_test)
     
     # rmse
-    mse = metrics.mean_squared_error(pred, y_test)
+    mse = metrics.mean_squared_error(y_test, pred)
     rmse = np.sqrt(mse)
+    # mae
+    mae = metrics.mean_absolute_error(y_test, pred)
     
     # plot
     fig, ax = plt.subplots()
@@ -340,50 +393,75 @@ for u in np.unique(gdf.cluster):
     ax.set_xlabel('Field depth (m)')
     ax.plot(0,1, lw=0.7, color='Red')
     ax.grid()
+    ax.text(0.1, max(pred)-0.1, 'RMSE: %.2f' % (rmse))
+    ax.text(0.1, max(pred)-1, 'R2: %.2f' % (score))
     plt.tight_layout()
     plt.show()
     print('R2: %.2f' % (score))
     print('RMSE: %.2f' % (rmse))
     
-    
+    # create mask
+    mask = np.where(kmeans == u, True, False)
     # reshape band ratios for predict
     predict_stack = np.reshape(band_ratios, (band_ratios.shape[0], band_ratios.shape[1]*band_ratios.shape[2])).T
     # replace nan or -inf
     predict_stack = np.where(np.isfinite(predict_stack), predict_stack, 0)
     # predict
-    prediction = mlr.predict(predict_stack)
-    
-    # reshape to 2D 
+    prediction = reg.predict(predict_stack)
+        # reshape to 2D 
     predicted = prediction.reshape((band_ratios.shape[1], band_ratios.shape[2]))
     
     # mask nodata
-    predicted = np.where(mask == True, np.nan, predicted)
-    # drop negative values
-    predicted = np.where(predicted < 0, np.nan, predicted)
-  
-    # mask outliers
-    predicted = maskSigma3Outliers(predicted)
-    # add to list
-    predictions.append(predicted)    
-    #plt.imshow(predicted)
+    predictions = np.where(mask == True, predicted, predictions)
     
 # predictions to array
-cbr = np.dstack(predictions)
+#cbr = np.dstack(predictions)
 # compute mean along 3rd axis
-cbr_sdb = np.nanmean(cbr, axis=2)
+#cbr_sdb = np.nanmean(cbr, axis=2)
 
-plt.imshow(cbr_sdb)
 
 outfile = os.path.join(os.path.dirname(fp), 'sdb', 'CBR_SDB.tif')
-outmeta = meta.copy()
-outmeta.update(count=1)
+outmeta = profile.copy()
+outmeta.update(count=1,
+               dtype='float32',
+               nodata=0)
 
 with rio.open(outfile, 'w', **outmeta) as dst:
-    dst.write(cbr_sdb.astype(rio.float32),1)
+    dst.write(predictions)
 
+# --------------------------- #
+# plot predicted depths against field measurements
+gt = sampleRaster(outfile, fp_gt, ['SDB'])
 
+# fix depths to floats
+if gt['Depth'].dtype != 'float64':
+    # convert syvyys_mitattu to numeric
+    gt['Depth'] = gt['Depth'].astype(float)
+else:
+    # absolute values
+    gt['Depth'] = abs(gt['Depth'])
+# ensure all sampled are values, drop row if not
+gt = gt[gt['SDB'] != '--']
 
+# rmse
+mse = metrics.mean_squared_error(gt['Depth'], gt['SDB'])
+rmse = np.sqrt(mse)
+# mae
+mae = metrics.mean_absolute_error(y_test, pred)
 
+# plot
+fig, ax = plt.subplots()
+ax.scatter(gt['Depth'], gt['SDB'], s=0.5, color='Blue')
+ax.set_ylabel('Predicted depth (m)')
+ax.set_xlabel('Field depth (m)')
+ax.plot(0,1, lw=0.7, color='Red')
+ax.grid()
+ax.text(0.1, max(gt['SDB'])-0.1, 'RMSE: %.2f' % (rmse))
+ax.text(0.1, max(gt['SDB'])-1, 'R2: %.2f' % (score))
+plt.tight_layout()
+plt.show()
+print('R2: %.2f' % (score))
+print('RMSE: %.2f' % (rmse))
 
 
 
