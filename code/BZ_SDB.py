@@ -28,14 +28,14 @@ from sklearn.preprocessing import PolynomialFeatures
 # function to compute logarithmic band ratio from given bands
 def StumpfLogBandRatio(image_array, bands):
     """
-    Compute logarithmic band ratio as ln(1000*pi*band) / ln(1000*pi*band), see Stumpf et al. (2003)
+    Compute logarithmic band ratio as ln(1000*band) / ln(1000*band), see Stumpf et al. (2003)
 
     Parameters
     ----------
     image_array : np.array
         Image array
     bands : tuple or list
-        Band indices 
+        Band numbers 
 
     Returns
     -------
@@ -72,13 +72,12 @@ def sampleRaster(raster_fp, geodataframe_fp):
         gdf['sampled'] = gpd.GeoDataFrame(gdf.sampled.tolist(), index=gdf.index)
     return gdf
 
+# filepaths
+fp_img = "/mnt/d/BlueZan/S2/downloads/Chwaka-NESAP_S2B_20260723T072619_10m_bands.tif"
+# icesat-2 data
+fp_pts = '/mnt/d/BlueZan/ICESAT-2/atl24_conf80_depths_chwaka-nesap_filtered.gpkg'
 
-fp_img = '/mnt/d/users/E1008409/MK/sansibar/S2/deglint/S2A_MSIL2A_20240429_B2B3B4B8_masked_chwaka_deglint.tif'
-#fp_pts = '/mnt/d/users/E1008409/MK/sansibar/Opetusdatat/habitat_field_data.shp'
-fp_pts = '/mnt/d/users/E1008409/MK/sansibar/Mission_10_2024/Field_work/BlueZan_habitat_data_11_2024_labels.gpkg'
-#fp_pts = '/mnt/d/users/E1008409/MK/sansibar/Lyzenga/Waypoints_Lyzenga.shp'
-
-outdir = os.path.join(os.path.dirname(fp_img), 'SDB')
+outdir = os.path.join(os.path.dirname(fp_img), 'sdb')
 if not os.path.isdir(outdir):
     os.mkdir(outdir)
 
@@ -86,17 +85,19 @@ if not os.path.isdir(outdir):
 with rio.open(fp_img) as src:
     img = src.read()
     profile = src.profile
-img = np.ma.masked_equal(img,0)
+#img = np.ma.masked_equal(img,0)
 # pts
 gdf = gpd.read_file(fp_pts, engine='pyogrio')
 print(gdf.columns)
 
 # compute log-ratio band
-logbr = StumpfLogBandRatio(img, (2,0))
+logbr = StumpfLogBandRatio(img, (1,2))
 # save
 outname = os.path.join(outdir, 'logbr.tif')
 outprof = profile.copy()
-outprof.update(count=1)
+outprof.update(dtype='float32',
+               count=1,
+               nodata=np.nan)
 with rio.open(outname, 'w', **outprof) as dst:
     dst.write(logbr,1)
 
@@ -105,16 +106,20 @@ gdf = sampleRaster(outname, fp_pts)
 # rename sampled column
 gdf = gdf.rename(columns={'sampled': 'logbr'})
 print(gdf.columns)
-gdf['Depth'] = gdf['Depth'].astype(float)
+gdf['Depth'] = gdf['depth'].astype(float)
 # select sand bottom
 #gdf = gdf[(gdf.Sand == 1) & (gdf.Seagrass == 0) & (gdf.Coral == 0) & (gdf.Mixed == 0) & (gdf.Macroalga == 0)]
 # keep data up to 15m depth and more than 1
 gdf = gdf[gdf['Depth'] < 18]
 #gdf = gdf[gdf['Depth'] >= 2]
 
-
+# set train and test data
 X = np.array(gdf.logbr).reshape(-1,1)
+# nodatamask
+namask = np.isnan(X)
+X = X[namask == False].reshape(-1,1)
 y = np.array(gdf['Depth'])
+y = y[namask[:,0] == False]
 
 # fit model
 reg = LinearRegression().fit(X, y)
@@ -202,7 +207,7 @@ print(np.nanmin(bathy))
 print(np.nanmax(bathy))
 bathy = np.where(bathy < 0, np.nan, bathy)
 # save
-bathy_out = os.path.join(outdir, 'logbr_bathy.tif')
+bathy_out = os.path.join(outdir, 'logbr_bathy_test.tif')
 with rio.open(bathy_out, 'w', **outprof) as dst:
     dst.write(bathy,1)
 
