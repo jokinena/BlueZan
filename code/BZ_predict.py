@@ -17,13 +17,13 @@ import pickle
 import geopandas as gpd
 
 # filepaths
-fp_img = '/mnt/d/BlueZan/S2/downloads/deglint/Chwaka-NESAP_S2B_20260723T072619_10m_bands_deglint.tif' # filepath for satellite image
-fp_model = '/mnt/d/BlueZan/S2/annotation/classification_2026/randomForest26.sav' # full filepath to model
-fp = '/mnt/d/BlueZan/S2/annotation/Chwaka_annotation.gpkg' # filepath for field points
+fp_img = '/mnt/d/BlueZan/S2/Chwaka/deglint/S2_2022_chwaka_cloudmasked_deglint.tif' # filepath for satellite image
+fp_model = '/mnt/d/BlueZan/S2/annotation/classification_2022/randomForest2022.sav' # full filepath to model
+fp = '/mnt/d/BlueZan/S2/annotation/Chwaka_annotation.gpkg' # annotation filepath to get habitat label names
 
 # Set True if predict probabilities
-PREDICT_PROBA = False
-SAVE_SINGLE_BAND_PROBA = False
+PREDICT_PROBA = True
+SAVE_SINGLE_BAND_PROBA = True
 # set descriptions from labels
 gdf = gpd.read_file(fp)
 descriptions = [f'{n}_proba' for n in np.unique(gdf.label)]
@@ -70,11 +70,11 @@ def predict(model, modelname, image, profile, outdir):
 
 def pred_proba(model, modelname, image, profile, outdir, descriptions):
     # predict
-    predicted = model.predict_proba(img.reshape(-1,img.shape[-1]))
+    predicted = model.predict_proba(image.reshape(-1,image.shape[-1]))
     # prediction back to 2D array
-    prediction = predicted.reshape(img.shape[0], img.shape[1], len(model.classes_))
+    prediction = predicted.reshape(image.shape[0], image.shape[1], len(model.classes_))
     # mask nodata
-    mask2d = np.any(img.mask, axis=-1)   # True where any input channel is masked
+    mask2d = np.any(image.mask, axis=-1)   # True where any input channel is masked
     mask2d = np.expand_dims(mask2d, axis=2)
     prediction = np.ma.where(mask2d, np.nan, prediction)
     # transpose
